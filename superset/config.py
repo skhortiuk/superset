@@ -371,6 +371,8 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     # for report with type 'report' still send with email and slack message with
     # screenshot and link
     "ALERTS_ATTACH_REPORTS": True,
+    # Enable creating of 'examples' database on datasets import
+    "CREATE_EXAMPLES_DATABASE": True,
 }
 
 # Set the default view to card/grid view if thumbnail support is enabled.
