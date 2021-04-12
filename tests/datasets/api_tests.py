@@ -1504,6 +1504,7 @@ class TestDatasetApi(SupersetTestCase):
 
         examples_database = get_example_database()
         db.session.delete(examples_database)
+        db.session.commit()
 
         buf = self.create_dataset_import()
         form_data = {
