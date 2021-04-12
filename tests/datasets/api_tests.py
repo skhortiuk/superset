@@ -1505,9 +1505,6 @@ class TestDatasetApi(SupersetTestCase):
         examples_database = get_example_database()
         db.session.delete(examples_database)
 
-        all_databases = db.session.query(Database).all()
-        assert len(all_databases) == 0
-
         buf = self.create_dataset_import()
         form_data = {
             "formData": (buf, "dataset_export.zip"),
