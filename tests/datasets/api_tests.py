@@ -1496,7 +1496,7 @@ class TestDatasetApi(SupersetTestCase):
     @patch.dict(
         "superset.extensions.feature_flag_manager._feature_flags",
         {"CREATE_EXAMPLES_DATABASE": False},
-        clear=True
+        clear=True,
     )
     def test_import_dataset_without_creation_of_examples_database(self):
         self.login(username="admin")
