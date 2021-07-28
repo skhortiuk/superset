@@ -18,8 +18,6 @@
 import collections
 import decimal
 import errno
-import functools
-import hashlib
 import json
 import logging
 import os
@@ -86,14 +84,21 @@ from sqlalchemy.types import TEXT, TypeDecorator, TypeEngine
 from typing_extensions import TypedDict
 
 import _thread  # pylint: disable=C0411
+from superset.constants import (
+    EXAMPLES_DB_UUID,
+    EXTRA_FORM_DATA_APPEND_KEYS,
+    EXTRA_FORM_DATA_OVERRIDE_EXTRA_KEYS,
+    EXTRA_FORM_DATA_OVERRIDE_REGULAR_MAPPINGS,
+)
 from superset.errors import ErrorLevel, SupersetErrorType
 from superset.exceptions import (
     CertificateException,
     SupersetException,
     SupersetTimeoutException,
 )
-from superset.typing import FlaskResponse, FormData, Metric
+from superset.typing import AdhocMetric, FlaskResponse, FormData, Metric
 from superset.utils.dates import datetime_to_epoch, EPOCH
+from superset.utils.hashing import md5_sha_from_dict, md5_sha_from_str
 
 try:
     from pydruid.utils.having import Having
@@ -174,6 +179,7 @@ class ChartDataResultType(str, Enum):
     RESULTS = "results"
     SAMPLES = "samples"
     TIMEGRAINS = "timegrains"
+    POST_PROCESSED = "post_processed"
 
 
 class DatasourceDict(TypedDict):
@@ -201,16 +207,19 @@ class FilterOperator(str, Enum):
     GREATER_THAN_OR_EQUALS = ">="
     LESS_THAN_OR_EQUALS = "<="
     LIKE = "LIKE"
+    ILIKE = "ILIKE"
     IS_NULL = "IS NULL"
     IS_NOT_NULL = "IS NOT NULL"
     IN = "IN"  # pylint: disable=invalid-name
     NOT_IN = "NOT IN"
     REGEX = "REGEX"
+    IS_TRUE = "IS TRUE"
+    IS_FALSE = "IS FALSE"
 
 
 class PostProcessingBoxplotWhiskerType(str, Enum):
     """
-    Calculate cell contibution to row/column total
+    Calculate cell contribution to row/column total
     """
 
     TUKEY = "tukey"
@@ -220,7 +229,7 @@ class PostProcessingBoxplotWhiskerType(str, Enum):
 
 class PostProcessingContributionOrientation(str, Enum):
     """
-    Calculate cell contibution to row/column total
+    Calculate cell contribution to row/column total
     """
 
     ROW = "row"
@@ -255,7 +264,15 @@ class QueryStatus(str, Enum):  # pylint: disable=too-few-public-methods
     RUNNING: str = "running"
     SCHEDULED: str = "scheduled"
     SUCCESS: str = "success"
+    FETCHING: str = "fetching"
     TIMED_OUT: str = "timed_out"
+
+
+class DashboardStatus(str, Enum):
+    """Dashboard status used for frontend filters"""
+
+    PUBLISHED = "published"
+    DRAFT = "draft"
 
 
 class ReservedUrlParameters(str, Enum):
@@ -348,68 +365,9 @@ def flasher(msg: str, severity: str = "message") -> None:
         flash(msg, severity)
     except RuntimeError:
         if severity == "danger":
-            logger.error(msg)
+            logger.error(msg, exc_info=True)
         else:
             logger.info(msg)
-
-
-class _memoized:
-    """Decorator that caches a function's return value each time it is called
-
-    If called later with the same arguments, the cached value is returned, and
-    not re-evaluated.
-
-    Define ``watch`` as a tuple of attribute names if this Decorator
-    should account for instance variable changes.
-    """
-
-    def __init__(
-        self, func: Callable[..., Any], watch: Optional[Tuple[str, ...]] = None
-    ) -> None:
-        self.func = func
-        self.cache: Dict[Any, Any] = {}
-        self.is_method = False
-        self.watch = watch or ()
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        key = [args, frozenset(kwargs.items())]
-        if self.is_method:
-            key.append(tuple([getattr(args[0], v, None) for v in self.watch]))
-        key = tuple(key)  # type: ignore
-        if key in self.cache:
-            return self.cache[key]
-        try:
-            value = self.func(*args, **kwargs)
-            self.cache[key] = value
-            return value
-        except TypeError:
-            # uncachable -- for instance, passing a list as an argument.
-            # Better to not cache than to blow up entirely.
-            return self.func(*args, **kwargs)
-
-    def __repr__(self) -> str:
-        """Return the function's docstring."""
-        return self.func.__doc__ or ""
-
-    def __get__(
-        self, obj: Any, objtype: Type[Any]
-    ) -> functools.partial:  # type: ignore
-        if not self.is_method:
-            self.is_method = True
-        # Support instance methods.
-        return functools.partial(self.__call__, obj)
-
-
-def memoized(
-    func: Optional[Callable[..., Any]] = None, watch: Optional[Tuple[str, ...]] = None
-) -> Callable[..., Any]:
-    if func:
-        return _memoized(func)
-
-    def wrapper(f: Callable[..., Any]) -> Callable[..., Any]:
-        return _memoized(f, watch)
-
-    return wrapper
 
 
 def parse_js_uri_path_item(
@@ -470,10 +428,6 @@ def list_minus(l: List[Any], minus: List[Any]) -> List[Any]:
     [1, 3]
     """
     return [o for o in l if o not in minus]
-
-
-def md5_hex(data: str) -> str:
-    return hashlib.md5(data.encode()).hexdigest()
 
 
 class DashboardEncoder(json.JSONEncoder):
@@ -745,7 +699,7 @@ def validate_json(obj: Union[bytes, bytearray, str]) -> None:
         try:
             json.loads(obj)
         except Exception as ex:
-            logger.error("JSON is not valid %s", str(ex))
+            logger.error("JSON is not valid %s", str(ex), exc_info=True)
             raise SupersetException("JSON is not valid")
 
 
@@ -761,7 +715,7 @@ class SigalrmTimeout:
     def handle_timeout(  # pylint: disable=unused-argument
         self, signum: int, frame: Any
     ) -> None:
-        logger.error("Process timed out")
+        logger.error("Process timed out", exc_info=True)
         raise SupersetTimeoutException(
             error_type=SupersetErrorType.BACKEND_TIMEOUT_ERROR,
             message=self.error_message,
@@ -1038,7 +992,6 @@ def to_adhoc(
     result = {
         "clause": clause.upper(),
         "expressionType": expression_type,
-        "filterOptionName": str(uuid.uuid4()),
         "isExtra": bool(filt.get("isExtra")),
     }
 
@@ -1053,6 +1006,9 @@ def to_adhoc(
     elif expression_type == "SQL":
         result.update({"sqlExpression": filt.get(clause)})
 
+    deterministic_name = md5_sha_from_dict(result)
+    result["filterOptionName"] = deterministic_name
+
     return result
 
 
@@ -1061,39 +1017,36 @@ def merge_extra_form_data(form_data: Dict[str, Any]) -> None:
     Merge extra form data (appends and overrides) into the main payload
     and add applied time extras to the payload.
     """
-    time_extras = {
-        "granularity": "__granularity",
-        "granularity_sqla": "__granularity",
-        "time_range": "__time_range",
-    }
-    allowed_extra_overrides: Dict[str, Optional[str]] = {
-        "time_grain_sqla": "__time_grain",
-        "druid_time_origin": "__time_origin",
-        "time_range_endpoints": None,
-    }
-
-    applied_time_extras = form_data.get("applied_time_extras", {})
-    form_data["applied_time_extras"] = applied_time_extras
+    filter_keys = ["filters", "adhoc_filters"]
     extra_form_data = form_data.pop("extra_form_data", {})
-    append_form_data = extra_form_data.pop("append_form_data", {})
-    append_filters = append_form_data.get("filters", None)
-    override_form_data = extra_form_data.pop("override_form_data", {})
-    for key, value in override_form_data.items():
-        form_data[key] = value
-        # mark as temporal overrides as applied time extras
-        time_extra = time_extras.get(key)
-        if time_extra:
-            applied_time_extras[time_extra] = value
+    append_filters = extra_form_data.get("filters", None)
+
+    # merge append extras
+    for key in [key for key in EXTRA_FORM_DATA_APPEND_KEYS if key not in filter_keys]:
+        extra_value = getattr(extra_form_data, key, {})
+        form_value = getattr(form_data, key, {})
+        form_value.update(extra_value)
+        if form_value:
+            form_data["key"] = extra_value
+
+    # map regular extras that apply to form data properties
+    for src_key, target_key in EXTRA_FORM_DATA_OVERRIDE_REGULAR_MAPPINGS.items():
+        value = extra_form_data.get(src_key)
+        if value is not None:
+            form_data[target_key] = value
+
+    # map extras that apply to form data extra properties
     extras = form_data.get("extras", {})
-    for key, value in allowed_extra_overrides.items():
-        extra = extras.get(key)
-        if value and extra:
-            applied_time_extras[value] = extra
-    form_data.update(extras)
+    for key in EXTRA_FORM_DATA_OVERRIDE_EXTRA_KEYS:
+        value = extra_form_data.get(key)
+        if value is not None:
+            extras[key] = value
+    if extras:
+        form_data["extras"] = extras
 
     adhoc_filters = form_data.get("adhoc_filters", [])
     form_data["adhoc_filters"] = adhoc_filters
-    append_adhoc_filters = append_form_data.get("adhoc_filters", [])
+    append_adhoc_filters = extra_form_data.get("adhoc_filters", [])
     adhoc_filters.extend({"isExtra": True, **fltr} for fltr in append_adhoc_filters)
     if append_filters:
         adhoc_filters.extend(
@@ -1216,9 +1169,16 @@ def get_or_create_db(
         db.session.query(models.Database).filter_by(database_name=database_name).first()
     )
 
+    # databases with a fixed UUID
+    uuids = {
+        "examples": EXAMPLES_DB_UUID,
+    }
+
     if not database and always_create:
         logger.info("Creating database reference for %s", database_name)
-        database = models.Database(database_name=database_name)
+        database = models.Database(
+            database_name=database_name, uuid=uuids.get(database_name)
+        )
         db.session.add(database)
 
     if database:
@@ -1256,6 +1216,11 @@ def get_metric_name(metric: Metric) -> str:
 
 def get_metric_names(metrics: Sequence[Metric]) -> List[str]:
     return [get_metric_name(metric) for metric in metrics]
+
+
+def get_main_metric_name(metrics: Sequence[Metric]) -> Optional[str]:
+    metric_labels = get_metric_names(metrics)
+    return metric_labels[0] if metric_labels else None
 
 
 def ensure_path_exists(path: str) -> None:
@@ -1372,7 +1337,7 @@ def create_ssl_cert_file(certificate: str) -> str:
     :return: The path to the certificate file
     :raises CertificateException: If certificate is not valid/unparseable
     """
-    filename = f"{hashlib.md5(certificate.encode('utf-8')).hexdigest()}.crt"
+    filename = f"{md5_sha_from_str(certificate)}.crt"
     cert_dir = current_app.config["SSL_CERT_PATH"]
     path = cert_dir if cert_dir else tempfile.gettempdir()
     path = os.path.join(path, filename)
@@ -1483,7 +1448,7 @@ def get_column_name_from_metric(metric: Metric) -> Optional[str]:
     :return: column name if simple metric, otherwise None
     """
     if is_adhoc_metric(metric):
-        metric = cast(Dict[str, Any], metric)
+        metric = cast(AdhocMetric, metric)
         if metric["expressionType"] == AdhocMetricExpressionType.SIMPLE:
             return cast(Dict[str, Any], metric["column"])["column_name"]
     return None
@@ -1674,3 +1639,35 @@ def normalize_dttm_col(
         df[DTTM_ALIAS] += timedelta(hours=offset)
     if time_shift is not None:
         df[DTTM_ALIAS] += time_shift
+
+
+def parse_boolean_string(bool_str: Optional[str]) -> bool:
+    """
+    Convert a string representation of a true/false value into a boolean
+
+    >>> parse_boolean_string(None)
+    False
+    >>> parse_boolean_string('false')
+    False
+    >>> parse_boolean_string('true')
+    True
+    >>> parse_boolean_string('False')
+    False
+    >>> parse_boolean_string('True')
+    True
+    >>> parse_boolean_string('foo')
+    False
+    >>> parse_boolean_string('0')
+    False
+    >>> parse_boolean_string('1')
+    True
+
+    :param bool_str: string representation of a value that is assumed to be boolean
+    :return: parsed boolean value
+    """
+    if bool_str is None:
+        return False
+    try:
+        return bool(strtobool(bool_str.lower()))
+    except ValueError:
+        return False

@@ -23,6 +23,12 @@ export type FavoriteStatus = {
   [id: number]: boolean;
 };
 
+export enum TableTabTypes {
+  FAVORITE = 'Favorite',
+  MINE = 'Mine',
+  EXAMPLES = 'Examples',
+}
+
 export type Filters = {
   col: string;
   opr: string;
@@ -37,6 +43,7 @@ export interface DashboardTableProps {
   mine: Array<Dashboard>;
   showThumbnails?: boolean;
   featureFlag?: boolean;
+  examples: Array<Dashboard>;
 }
 
 export interface Dashboard {
@@ -123,7 +130,12 @@ export enum QueryObjectColumns {
   tracking_url = 'tracking_url',
 }
 
-export type ImportResourceName = 'chart' | 'dashboard' | 'database' | 'dataset';
+export type ImportResourceName =
+  | 'chart'
+  | 'dashboard'
+  | 'database'
+  | 'dataset'
+  | 'saved_query';
 
 export type DatabaseObject = {
   allow_run_async?: boolean;

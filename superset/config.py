@@ -29,7 +29,6 @@ import re
 import sys
 from collections import OrderedDict
 from datetime import date
-from distutils.util import strtobool
 from typing import Any, Callable, Dict, List, Optional, Type, TYPE_CHECKING, Union
 
 from cachelib.base import BaseCache
@@ -44,7 +43,8 @@ from superset.jinja_context import (  # pylint: disable=unused-import
 )
 from superset.stats_logger import DummyStatsLogger
 from superset.typing import CacheConfig
-from superset.utils.core import is_test
+from superset.utils.core import is_test, parse_boolean_string
+from superset.utils.encrypt import SQLAlchemyUtilsAdapter
 from superset.utils.log import DBEventLogger
 from superset.utils.logging_configurator import DefaultLoggingConfigurator
 
@@ -172,6 +172,17 @@ SQLALCHEMY_DATABASE_URI = "sqlite:///" + os.path.join(DATA_DIR, "superset.db")
 # SQLALCHEMY_CUSTOM_PASSWORD_STORE = lookup_password
 SQLALCHEMY_CUSTOM_PASSWORD_STORE = None
 
+#
+# The EncryptedFieldTypeAdapter is used whenever we're building SqlAlchemy models
+# which include sensitive fields that should be app-encrypted BEFORE sending
+# to the DB.
+#
+# Note: the default impl leverages SqlAlchemyUtils' EncryptedType, which defaults
+#  to AES-128 under the covers using the app's SECRET_KEY as key material.
+#
+# pylint: disable=C0103
+SQLALCHEMY_ENCRYPTED_FIELD_TYPE_ADAPTER = SQLAlchemyUtilsAdapter
+
 # The limit of queries fetched for query search
 QUERY_SEARCH_LIMIT = 1000
 
@@ -201,13 +212,19 @@ PROXY_FIX_CONFIG = {"x_for": 1, "x_proto": 1, "x_host": 1, "x_port": 1, "x_prefi
 # Uncomment to setup Your App name
 APP_NAME = "Superset"
 
-# Uncomment to setup an App icon
+# Specify the App icon
 APP_ICON = "/static/assets/images/superset-logo-horiz.png"
 APP_ICON_WIDTH = 126
 
-# Uncomment to specify where clicking the logo would take the user
+# Specify where clicking the logo would take the user
 # e.g. setting it to '/' would take the user to '/superset/welcome/'
 LOGO_TARGET_PATH = None
+
+# Specify tooltip that should appear when hovering over the App Icon/Logo
+LOGO_TOOLTIP = ""
+
+# Specify any text that should appear to the right of the logo
+LOGO_RIGHT_TEXT: Union[Callable[[], str], str] = ""
 
 # Enables SWAGGER UI for superset openapi spec
 # ex: http://localhost:8080/swagger/v1
@@ -292,6 +309,7 @@ LANGUAGES = {
     "pt_BR": {"flag": "br", "name": "Brazilian Portuguese"},
     "ru": {"flag": "ru", "name": "Russian"},
     "ko": {"flag": "kr", "name": "Korean"},
+    "sl": {"flag": "si", "name": "Slovenian"},
 }
 # Turning off i18n by default as translation in most languages are
 # incomplete and not well maintained.
@@ -323,6 +341,7 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     # See `PR 7935 <https://github.com/apache/superset/pull/7935>`_ for more details.
     "ENABLE_EXPLORE_JSON_CSRF_PROTECTION": False,
     "ENABLE_TEMPLATE_PROCESSING": False,
+    "ENABLE_TEMPLATE_REMOVE_FILTERS": False,
     "KV_STORE": False,
     # When this feature is enabled, nested types in Presto will be
     # expanded into extra columns and/or arrays. This is experimental,
@@ -348,6 +367,7 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     "DASHBOARD_NATIVE_FILTERS": False,
     "DASHBOARD_CROSS_FILTERS": False,
     "DASHBOARD_NATIVE_FILTERS_SET": False,
+    "DASHBOARD_FILTERS_EXPERIMENTAL": False,
     "GLOBAL_ASYNC_QUERIES": False,
     "VERSIONED_EXPORT": False,
     # Note that: RowLevelSecurityFilter is only given by default to the Admin role
@@ -371,14 +391,21 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     # for report with type 'report' still send with email and slack message with
     # screenshot and link
     "ALERTS_ATTACH_REPORTS": True,
-    # Enable creating of 'examples' database on datasets import
-    "CREATE_EXAMPLES_DATABASE": True,
+    # FORCE_DATABASE_CONNECTIONS_SSL is depreciated.
+    "FORCE_DATABASE_CONNECTIONS_SSL": False,
+    # Enabling ENFORCE_DB_ENCRYPTION_UI forces all database connections to be
+    # encrypted before being saved into superset metastore.
+    "ENFORCE_DB_ENCRYPTION_UI": False,
+    # Allow users to export full CSV of table viz type.
+    # This could cause the server to run out of memory or compute.
+    "ALLOW_FULL_CSV_EXPORT": False,
+    "UX_BETA": False,
 }
 
 # Feature flags may also be set via 'SUPERSET_FEATURE_' prefixed environment vars.
 DEFAULT_FEATURE_FLAGS.update(
     {
-        k[len("SUPERSET_FEATURE_") :]: bool(strtobool(v))
+        k[len("SUPERSET_FEATURE_") :]: parse_boolean_string(v)
         for k, v in os.environ.items()
         if re.search(r"^SUPERSET_FEATURE_\w+", k)
     }
@@ -399,7 +426,7 @@ FEATURE_FLAGS: Dict[str, bool] = {}
 # from flask import g, request
 # def GET_FEATURE_FLAGS_FUNC(feature_flags_dict: Dict[str, bool]) -> Dict[str, bool]:
 #     if hasattr(g, "user") and g.user.is_active:
-#         feature_flags_dict['some_feature'] = g.user and g.user.id == 5
+#         feature_flags_dict['some_feature'] = g.user and g.user.get_id() == 5
 #     return feature_flags_dict
 GET_FEATURE_FLAGS_FUNC: Optional[Callable[[Dict[str, bool]], Dict[str, bool]]] = None
 
@@ -462,11 +489,19 @@ THUMBNAIL_CACHE_CONFIG: CacheConfig = {
     "CACHE_NO_NULL_WARNING": True,
 }
 
-# Used for thumbnails and other api: Time in seconds before selenium
+# Time in seconds before selenium
 # times out after trying to locate an element on the page and wait
-# for that element to load for an alert screenshot.
+# for that element to load for a screenshot.
 SCREENSHOT_LOCATE_WAIT = 10
+# Time in seconds before selenium
+# times out after waiting for all DOM class elements named "loading" are gone.
 SCREENSHOT_LOAD_WAIT = 60
+# Selenium destroy retries
+SCREENSHOT_SELENIUM_RETRIES = 5
+# Give selenium an headstart, in seconds
+SCREENSHOT_SELENIUM_HEADSTART = 3
+# Wait for the chart animation, in seconds
+SCREENSHOT_SELENIUM_ANIMATION_WAIT = 5
 
 # ---------------------------------------------------
 # Image and file configuration
@@ -781,9 +816,16 @@ CSV_TO_HIVE_UPLOAD_S3_BUCKET = None
 CSV_TO_HIVE_UPLOAD_DIRECTORY = "EXTERNAL_HIVE_TABLES/"
 # Function that creates upload directory dynamically based on the
 # database used, user and schema provided.
-CSV_TO_HIVE_UPLOAD_DIRECTORY_FUNC: Callable[
-    ["Database", "models.User", str], Optional[str]
-] = lambda database, user, schema: CSV_TO_HIVE_UPLOAD_DIRECTORY
+def CSV_TO_HIVE_UPLOAD_DIRECTORY_FUNC(
+    database: "Database",
+    user: "models.User",  # pylint: disable=unused-argument
+    schema: Optional[str],
+) -> str:
+    # Note the final empty path enforces a trailing slash.
+    return os.path.join(
+        CSV_TO_HIVE_UPLOAD_DIRECTORY, str(database.id), schema or "", ""
+    )
+
 
 # The namespace within hive where the tables created from
 # uploading CSVs will be stored.
@@ -946,6 +988,9 @@ ALERT_REPORTS_WORKING_TIME_OUT_LAG = 10
 # if ALERT_REPORTS_WORKING_TIME_OUT_KILL is True, set a celery hard timeout
 # Equal to working timeout + ALERT_REPORTS_WORKING_SOFT_TIME_OUT_LAG
 ALERT_REPORTS_WORKING_SOFT_TIME_OUT_LAG = 1
+# If set to true no notification is sent, the worker will just log a message.
+# Useful for debugging
+ALERT_REPORTS_NOTIFICATION_DRY_RUN = False
 
 # A custom prefix to use on all Alerts & Reports emails
 EMAIL_REPORTS_SUBJECT_PREFIX = "[Report] "
@@ -1008,16 +1053,12 @@ WEBDRIVER_WINDOW = {"dashboard": (1600, 2000), "slice": (3000, 1200)}
 WEBDRIVER_AUTH_FUNC = None
 
 # Any config options to be passed as-is to the webdriver
-WEBDRIVER_CONFIGURATION: Dict[Any, Any] = {}
+WEBDRIVER_CONFIGURATION: Dict[Any, Any] = {"service_log_path": "/dev/null"}
 
 # Additional args to be passed as arguments to the config object
 # Note: these options are Chrome-specific. For FF, these should
 # only include the "--headless" arg
-WEBDRIVER_OPTION_ARGS = [
-    "--force-device-scale-factor=2.0",
-    "--high-dpi-support=2.0",
-    "--headless",
-]
+WEBDRIVER_OPTION_ARGS = ["--headless", "--marionette"]
 
 # The base URL to query for accessing the user interface
 WEBDRIVER_BASEURL = "http://0.0.0.0:8080/"
@@ -1050,6 +1091,18 @@ SQL_VALIDATORS_BY_ENGINE = {
     "presto": "PrestoDBSQLValidator",
     "postgresql": "PostgreSQLValidator",
 }
+
+# A list of preferred databases, in order. These databases will be
+# displayed prominently in the "Add Database" dialog. You should
+# use the "engine_name" attribute of the corresponding DB engine spec
+# in `superset/db_engine_specs/`.
+PREFERRED_DATABASES: List[str] = [
+    "PostgreSQL",
+    "Presto",
+    "MySQL",
+    "SQLite",
+    # etc.
+]
 
 # Do you want Talisman enabled?
 TALISMAN_ENABLED = False

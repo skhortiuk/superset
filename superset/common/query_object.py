@@ -15,12 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=R
-import hashlib
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, NamedTuple, Optional, Union
+from typing import Any, Dict, List, NamedTuple, Optional
 
-import simplejson as json
 from flask_babel import gettext as _
 from pandas import DataFrame
 
@@ -40,6 +38,7 @@ from superset.utils.core import (
     json_int_dttm_ser,
 )
 from superset.utils.date_parser import get_since_until, parse_human_timedelta
+from superset.utils.hashing import md5_sha_from_dict
 from superset.views.utils import get_time_range_endpoints
 
 config = app.config
@@ -104,7 +103,7 @@ class QueryObject:
         applied_time_extras: Optional[Dict[str, str]] = None,
         apply_fetch_values_predicate: bool = False,
         granularity: Optional[str] = None,
-        metrics: Optional[List[Union[Dict[str, Any], str]]] = None,
+        metrics: Optional[List[Metric]] = None,
         groupby: Optional[List[str]] = None,
         filters: Optional[List[Dict[str, Any]]] = None,
         time_range: Optional[str] = None,
@@ -171,9 +170,7 @@ class QueryObject:
         #   2. { label: 'label_name' }  - legacy format for a predefined metric
         #   3. { expressionType: 'SIMPLE' | 'SQL', ... } - adhoc metric
         self.metrics = metrics and [
-            x
-            if isinstance(x, str) or is_adhoc_metric(x)
-            else x["label"]  # type: ignore
+            x if isinstance(x, str) or is_adhoc_metric(x) else x["label"]
             for x in metrics
         ]
 
@@ -333,14 +330,7 @@ class QueryObject:
         if annotation_layers:
             cache_dict["annotation_layers"] = annotation_layers
 
-        json_data = self.json_dumps(cache_dict, sort_keys=True)
-        return hashlib.md5(json_data.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def json_dumps(obj: Any, sort_keys: bool = False) -> str:
-        return json.dumps(
-            obj, default=json_int_dttm_ser, ignore_nan=True, sort_keys=sort_keys
-        )
+        return md5_sha_from_dict(cache_dict, default=json_int_dttm_ser, ignore_nan=True)
 
     def exec_post_processing(self, df: DataFrame) -> DataFrame:
         """

@@ -22,7 +22,7 @@ import { mix } from 'polished';
 import cx from 'classnames';
 import { Button as AntdButton } from 'antd';
 import { useTheme } from '@superset-ui/core';
-import { Tooltip } from 'src/common/components/Tooltip';
+import { Tooltip } from 'src/components/Tooltip';
 
 export type OnClickHandler = React.MouseEventHandler<HTMLElement>;
 
@@ -62,6 +62,7 @@ export interface ButtonProps {
   href?: string;
   htmlType?: 'button' | 'submit' | 'reset';
   cta?: boolean;
+  loading?: boolean | { delay?: number | undefined } | undefined;
 }
 
 export default function Button(props: ButtonProps) {

@@ -131,12 +131,7 @@ testdata() {
 
 codecov() {
   say "::group::Upload code coverage"
-  local codecovScript="${HOME}/codecov.sh"
-  # download bash script if needed
-  if [[ ! -f "$codecovScript" ]]; then
-    curl -s https://codecov.io/bash >"$codecovScript"
-  fi
-  bash "$codecovScript" "$@"
+  bash ".github/workflows/codecov.sh" "$@"
   say "::endgroup::"
 }
 
@@ -197,7 +192,7 @@ cypress-run-all() {
   say "::endgroup::"
 
   # Rerun SQL Lab tests with backend persist enabled
-  export SUPERSET_CONFIG=tests.superset_test_config_sqllab_backend_persist
+  export SUPERSET_CONFIG=tests.integration_tests.superset_test_config_sqllab_backend_persist
 
   # Restart Flask with new configs
   kill $flaskProcessId

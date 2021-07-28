@@ -24,7 +24,7 @@ import thunk from 'redux-thunk';
 import { act } from 'react-dom/test-utils';
 import sinon from 'sinon';
 import { supersetTheme, ThemeProvider } from '@superset-ui/core';
-import Modal from 'src/common/components/Modal';
+import Modal from 'src/components/Modal';
 import ChangeDatasourceModal from 'src/datasource/ChangeDatasourceModal';
 import waitForComponentToPaint from 'spec/helpers/waitForComponentToPaint';
 import mockDatasource from 'spec/fixtures/mockDatasource';
@@ -48,7 +48,7 @@ const datasourceData = {
 };
 
 const DATASOURCES_ENDPOINT =
-  'glob:*/api/v1/dataset/?q=(order_column:changed_on_delta_humanized,order_direction:asc,page:0,page_size:20)';
+  'glob:*/api/v1/dataset/?q=(order_column:changed_on_delta_humanized,order_direction:desc,page:0,page_size:25)';
 const DATASOURCE_ENDPOINT = `glob:*/datasource/get/${datasourceData.type}/${datasourceData.id}`;
 const DATASOURCE_PAYLOAD = { new: 'data' };
 

@@ -18,19 +18,18 @@
  */
 import React from 'react';
 import PropTypes from 'prop-types';
-import { Col } from 'react-bootstrap';
-import Card from 'src/common/components/Card';
-import { Radio } from 'src/common/components/Radio';
+import { Row, Col } from 'src/common/components';
+import { Radio } from 'src/components/Radio';
+import Card from 'src/components/Card';
 import Alert from 'src/components/Alert';
 import Badge from 'src/components/Badge';
 import shortid from 'shortid';
 import { styled, SupersetClient, t, supersetTheme } from '@superset-ui/core';
 import Button from 'src/components/Button';
-import Tabs from 'src/common/components/Tabs';
+import Tabs from 'src/components/Tabs';
 import CertifiedIcon from 'src/components/CertifiedIcon';
 import WarningIconWithTooltip from 'src/components/WarningIconWithTooltip';
 import DatabaseSelector from 'src/components/DatabaseSelector';
-import Icon from 'src/components/Icon';
 import Label from 'src/components/Label';
 import Loading from 'src/components/Loading';
 import TableSelector from 'src/components/TableSelector';
@@ -51,6 +50,7 @@ import Field from 'src/CRUD/Field';
 
 import withToasts from 'src/messageToasts/enhancers/withToasts';
 import { FeatureFlag, isFeatureEnabled } from 'src/featureFlags';
+import Icons from 'src/components/Icons';
 
 const DatasourceContainer = styled.div`
   .change-warning {
@@ -75,7 +75,7 @@ const FlexRowContainer = styled.div`
   align-items: center;
   display: flex;
 
-  > svg {
+  svg {
     margin-right: ${({ theme }) => theme.gridUnit}px;
   }
 `;
@@ -84,6 +84,14 @@ const StyledTableTabs = styled(Tabs)`
   overflow: visible;
   .ant-tabs-content-holder {
     overflow: visible;
+  }
+`;
+
+const StyledBadge = styled(Badge)`
+  .ant-badge-count {
+    line-height: ${({ theme }) => theme.gridUnit * 4}px;
+    height: ${({ theme }) => theme.gridUnit * 4}px;
+    margin-left: ${({ theme }) => theme.gridUnit}px;
   }
 `;
 
@@ -117,8 +125,12 @@ DATASOURCE_TYPES_ARR.forEach(o => {
 
 function CollectionTabTitle({ title, collection }) {
   return (
-    <div data-test={`collection-tab-${title}`}>
-      {title} <Badge count={collection ? collection.length : 0} showZero />
+    <div
+      css={{ display: 'flex', alignItems: 'center' }}
+      data-test={`collection-tab-${title}`}
+    >
+      {title}{' '}
+      <StyledBadge count={collection ? collection.length : 0} showZero />
     </div>
   );
 }
@@ -141,6 +153,7 @@ function ColumnCollectionTable({
     <CollectionTable
       collection={columns}
       tableColumns={['column_name', 'type', 'is_dttm', 'filterable', 'groupby']}
+      sortColumns={['column_name', 'type', 'is_dttm', 'filterable', 'groupby']}
       allowDeletes
       allowAddItem={allowAddItem}
       itemGenerator={itemGenerator}
@@ -239,7 +252,7 @@ function ColumnCollectionTable({
           ) : (
             v
           ),
-        type: d => <Label>{d}</Label>,
+        type: d => (d ? <Label>{d}</Label> : null),
         is_dttm: checkboxGenerator,
         filterable: checkboxGenerator,
         groupby: checkboxGenerator,
@@ -307,7 +320,21 @@ class DatasourceEditor extends React.PureComponent {
   constructor(props) {
     super(props);
     this.state = {
-      datasource: props.datasource,
+      datasource: {
+        ...props.datasource,
+        metrics: props.datasource.metrics?.map(metric => {
+          const {
+            certification: { details, certified_by: certifiedBy } = {},
+            warning_markdown: warningMarkdown,
+          } = JSON.parse(metric.extra || '{}') || {};
+          return {
+            ...metric,
+            certification_details: details || '',
+            warning_markdown: warningMarkdown || '',
+            certified_by: certifiedBy,
+          };
+        }),
+      },
       errors: [],
       isDruid:
         props.datasource.type === 'druid' ||
@@ -379,6 +406,7 @@ class DatasourceEditor extends React.PureComponent {
   }
 
   setColumns(obj) {
+    // update calculatedColumns or databaseColumns
     this.setState(obj, this.validateAndChange);
   }
 
@@ -414,13 +442,18 @@ class DatasourceEditor extends React.PureComponent {
           type: col.type,
           groupby: true,
           filterable: true,
+          is_dttm: col.is_dttm,
         });
         results.added.push(col.name);
-      } else if (currentCol.type !== col.type) {
+      } else if (
+        currentCol.type !== col.type ||
+        currentCol.is_dttm !== col.is_dttm
+      ) {
         // modified column
         finalColumns.push({
           ...currentCol,
           type: col.type,
+          is_dttm: col.is_dttm,
         });
         results.modified.push(col.name);
       } else {
@@ -548,6 +581,7 @@ class DatasourceEditor extends React.PureComponent {
           control={<TextControl controlId="default_endpoint" />}
         />
         <Field
+          inline
           fieldKey="filter_select_enabled"
           label={t('Autocomplete filters')}
           description={t('Whether to populate autocomplete filters options')}
@@ -773,7 +807,7 @@ class DatasourceEditor extends React.PureComponent {
             </div>
           )}
           {this.state.datasourceType === DATASOURCE_TYPES.physical.key && (
-            <Col md={6}>
+            <Col xs={24} md={12}>
               {this.state.isSqla && (
                 <Field
                   fieldKey="tableSelector"
@@ -820,10 +854,15 @@ class DatasourceEditor extends React.PureComponent {
         {this.allowEditSource && (
           <EditLockContainer>
             <span role="button" tabIndex={0} onClick={this.onChangeEditMode}>
-              <Icon
-                color={supersetTheme.colors.grayscale.base}
-                name={this.state.isEditMode ? 'lock-unlocked' : 'lock-locked'}
-              />
+              {this.state.isEditMode ? (
+                <Icons.LockUnlocked
+                  iconColor={supersetTheme.colors.grayscale.base}
+                />
+              ) : (
+                <Icons.LockLocked
+                  iconColor={supersetTheme.colors.grayscale.base}
+                />
+              )}
             </span>
             {!this.state.isEditMode && (
               <div>{t('Click the lock to make changes.')}</div>
@@ -860,6 +899,7 @@ class DatasourceEditor extends React.PureComponent {
     return (
       <CollectionTable
         tableColumns={['metric_name', 'verbose_name', 'expression']}
+        sortColumns={['metric_name', 'verbose_name', 'expression']}
         columnLabels={{
           metric_name: t('Metric'),
           verbose_name: t('Label'),
@@ -1085,14 +1125,14 @@ class DatasourceEditor extends React.PureComponent {
             />
           </Tabs.TabPane>
           <Tabs.TabPane key={4} tab={t('Settings')}>
-            <div>
-              <Col md={6}>
+            <Row gutter={16}>
+              <Col xs={24} md={12}>
                 <FormContainer>{this.renderSettingsFieldset()}</FormContainer>
               </Col>
-              <Col md={6}>
+              <Col xs={24} md={12}>
                 <FormContainer>{this.renderAdvancedFieldset()}</FormContainer>
               </Col>
-            </div>
+            </Row>
           </Tabs.TabPane>
         </StyledTableTabs>
       </DatasourceContainer>

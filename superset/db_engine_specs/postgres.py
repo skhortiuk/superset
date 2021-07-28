@@ -37,9 +37,10 @@ from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, ENUM, JSON
 from sqlalchemy.dialects.postgresql.base import PGInspector
 from sqlalchemy.types import String, TypeEngine
 
-from superset.db_engine_specs.base import BaseEngineSpec
+from superset.db_engine_specs.base import BaseEngineSpec, BasicParametersMixin
 from superset.errors import SupersetErrorType
 from superset.exceptions import SupersetException
+from superset.models.sql_lab import Query
 from superset.utils import core as utils
 from superset.utils.core import ColumnSpec, GenericDataType
 
@@ -56,11 +57,14 @@ class FixedOffsetTimezone(_FixedOffset):
 
 
 # Regular expressions to catch custom errors
-INVALID_USERNAME_REGEX = re.compile('role "(?P<username>.*?)" does not exist')
-INVALID_PASSWORD_REGEX = re.compile(
+CONNECTION_INVALID_USERNAME_REGEX = re.compile(
+    'role "(?P<username>.*?)" does not exist'
+)
+CONNECTION_INVALID_PASSWORD_REGEX = re.compile(
     'password authentication failed for user "(?P<username>.*?)"'
 )
-INVALID_HOSTNAME_REGEX = re.compile(
+CONNECTION_INVALID_PASSWORD_NEEDED_REGEX = re.compile("no password supplied")
+CONNECTION_INVALID_HOSTNAME_REGEX = re.compile(
     'could not translate host name "(?P<hostname>.*?)" to address: '
     "nodename nor servname provided, or not known"
 )
@@ -74,6 +78,15 @@ CONNECTION_HOST_DOWN_REGEX = re.compile(
     r'host "(?P<hostname>.*?)" (\(.*?\) )?and accepting\s+TCP/IP '
     r"connections on port (?P<port>.*?)\?"
 )
+CONNECTION_UNKNOWN_DATABASE_REGEX = re.compile(
+    'database "(?P<database>.*?)" does not exist'
+)
+COLUMN_DOES_NOT_EXIST_REGEX = re.compile(
+    r'postgresql error: column "(?P<column_name>.+?)" '
+    r"does not exist\s+LINE (?P<location>\d+?)"
+)
+
+SYNTAX_ERROR_REGEX = re.compile('syntax error at or near "(?P<syntax_error>.*?)"')
 
 
 class PostgresBaseEngineSpec(BaseEngineSpec):
@@ -94,29 +107,60 @@ class PostgresBaseEngineSpec(BaseEngineSpec):
         "P1Y": "DATE_TRUNC('year', {col})",
     }
 
-    custom_errors = {
-        INVALID_USERNAME_REGEX: (
+    custom_errors: Dict[Pattern[str], Tuple[str, SupersetErrorType, Dict[str, Any]]] = {
+        CONNECTION_INVALID_USERNAME_REGEX: (
             __('The username "%(username)s" does not exist.'),
-            SupersetErrorType.TEST_CONNECTION_INVALID_USERNAME_ERROR,
+            SupersetErrorType.CONNECTION_INVALID_USERNAME_ERROR,
+            {"invalid": ["username"]},
         ),
-        INVALID_PASSWORD_REGEX: (
+        CONNECTION_INVALID_PASSWORD_REGEX: (
             __('The password provided for username "%(username)s" is incorrect.'),
-            SupersetErrorType.TEST_CONNECTION_INVALID_PASSWORD_ERROR,
+            SupersetErrorType.CONNECTION_INVALID_PASSWORD_ERROR,
+            {"invalid": ["username", "password"]},
         ),
-        INVALID_HOSTNAME_REGEX: (
+        CONNECTION_INVALID_PASSWORD_NEEDED_REGEX: (
+            __("Please re-enter the password."),
+            SupersetErrorType.CONNECTION_ACCESS_DENIED_ERROR,
+            {"invalid": ["password"]},
+        ),
+        CONNECTION_INVALID_HOSTNAME_REGEX: (
             __('The hostname "%(hostname)s" cannot be resolved.'),
-            SupersetErrorType.TEST_CONNECTION_INVALID_HOSTNAME_ERROR,
+            SupersetErrorType.CONNECTION_INVALID_HOSTNAME_ERROR,
+            {"invalid": ["host"]},
         ),
         CONNECTION_PORT_CLOSED_REGEX: (
-            __("Port %(port)s on hostname %(hostname)s refused the connection."),
-            SupersetErrorType.TEST_CONNECTION_PORT_CLOSED_ERROR,
+            __('Port %(port)s on hostname "%(hostname)s" refused the connection.'),
+            SupersetErrorType.CONNECTION_PORT_CLOSED_ERROR,
+            {"invalid": ["host", "port"]},
         ),
         CONNECTION_HOST_DOWN_REGEX: (
             __(
-                "The host %(hostname)s might be down, and can't be "
-                "reached on port %(port)s"
+                'The host "%(hostname)s" might be down, and can\'t be '
+                "reached on port %(port)s."
             ),
-            SupersetErrorType.TEST_CONNECTION_HOST_DOWN_ERROR,
+            SupersetErrorType.CONNECTION_HOST_DOWN_ERROR,
+            {"invalid": ["host", "port"]},
+        ),
+        CONNECTION_UNKNOWN_DATABASE_REGEX: (
+            __('Unable to connect to database "%(database)s".'),
+            SupersetErrorType.CONNECTION_UNKNOWN_DATABASE_ERROR,
+            {"invalid": ["database"]},
+        ),
+        COLUMN_DOES_NOT_EXIST_REGEX: (
+            __(
+                'We can\'t seem to resolve the column "%(column_name)s" at '
+                "line %(location)s.",
+            ),
+            SupersetErrorType.COLUMN_DOES_NOT_EXIST_ERROR,
+            {},
+        ),
+        SYNTAX_ERROR_REGEX: (
+            __(
+                "Please check your query for syntax errors at or "
+                'near "%(syntax_error)s". Then, try running your query again.'
+            ),
+            SupersetErrorType.SYNTAX_ERROR,
+            {},
         ),
     }
 
@@ -134,9 +178,17 @@ class PostgresBaseEngineSpec(BaseEngineSpec):
         return "(timestamp 'epoch' + {col} * interval '1 second')"
 
 
-class PostgresEngineSpec(PostgresBaseEngineSpec):
+class PostgresEngineSpec(PostgresBaseEngineSpec, BasicParametersMixin):
     engine = "postgresql"
-    engine_aliases = ("postgres",)
+    engine_aliases = {"postgres"}
+
+    default_driver = "psycopg2"
+    sqlalchemy_uri_placeholder = (
+        "postgresql://user:password@host:port/dbname[?key=value&key=value...]"
+    )
+    # https://www.postgresql.org/docs/9.1/libpq-ssl.html#LIBQ-SSL-CERTIFICATES
+    encryption_parameters = {"sslmode": "require"}
+
     max_column_name_length = 63
     try_remove_schema_from_table_name = False
 
@@ -224,7 +276,7 @@ class PostgresEngineSpec(PostgresBaseEngineSpec):
         return extra
 
     @classmethod
-    def get_column_spec(  # type: ignore
+    def get_column_spec(
         cls,
         native_type: Optional[str],
         source: utils.ColumnTypeSource = utils.ColumnTypeSource.GET_TABLE,
@@ -245,3 +297,38 @@ class PostgresEngineSpec(PostgresBaseEngineSpec):
         return super().get_column_spec(
             native_type, column_type_mappings=column_type_mappings
         )
+
+    @classmethod
+    def get_cancel_query_id(cls, cursor: Any, query: Query) -> Optional[str]:
+        """
+        Get Postgres PID that will be used to cancel all other running
+        queries in the same session.
+
+        :param cursor: Cursor instance in which the query will be executed
+        :param query: Query instance
+        :return: Postgres PID
+        """
+        cursor.execute("SELECT pg_backend_pid()")
+        row = cursor.fetchone()
+        return row[0]
+
+    @classmethod
+    def cancel_query(cls, cursor: Any, query: Query, cancel_query_id: str) -> bool:
+        """
+        Cancel query in the underlying database.
+
+        :param cursor: New cursor instance to the db of the query
+        :param query: Query instance
+        :param cancel_query_id: Postgres PID
+        :return: True if query cancelled successfully, False otherwise
+        """
+        try:
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) "
+                "FROM pg_stat_activity "
+                f"WHERE pid='{cancel_query_id}'"
+            )
+        except Exception:  # pylint: disable=broad-except
+            return False
+
+        return True

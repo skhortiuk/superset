@@ -77,6 +77,11 @@ params_description = (
     "or overwrite button in the explore view. "
     "This JSON object for power users who may want to alter specific parameters."
 )
+query_context_description = (
+    "The query context represents the queries that need to run "
+    "in order to generate the data the visualization, and in what "
+    "format the data should be returned."
+)
 cache_timeout_description = (
     "Duration (in seconds) of the caching timeout "
     "for this chart. Note this defaults to the datasource/table"
@@ -167,6 +172,11 @@ class ChartPostSchema(Schema):
     params = fields.String(
         description=params_description, allow_none=True, validate=utils.validate_json
     )
+    query_context = fields.String(
+        description=query_context_description,
+        allow_none=True,
+        validate=utils.validate_json,
+    )
     cache_timeout = fields.Integer(
         description=cache_timeout_description, allow_none=True
     )
@@ -199,6 +209,9 @@ class ChartPutSchema(Schema):
     )
     owners = fields.List(fields.Integer(description=owners_description))
     params = fields.String(description=params_description, allow_none=True)
+    query_context = fields.String(
+        description=query_context_description, allow_none=True
+    )
     cache_timeout = fields.Integer(
         description=cache_timeout_description, allow_none=True
     )
@@ -1007,11 +1020,21 @@ class ChartDataQueryObjectSchema(Schema):
         allow_none=True,
     )
     orderby = fields.List(
-        fields.List(fields.Raw()),
+        fields.Tuple(
+            (
+                fields.Raw(
+                    validate=[
+                        Length(min=1, error=_("orderby column must be populated"))
+                    ],
+                    allow_none=False,
+                ),
+                fields.Boolean(),
+            )
+        ),
         description="Expects a list of lists where the first element is the column "
         "name which to sort by, and the second element is a boolean.",
         allow_none=True,
-        example=[["my_col_1", False], ["my_col_2", True]],
+        example=[("my_col_1", False), ("my_col_2", True)],
     )
     where = fields.String(
         description="WHERE clause to be added to queries using AND operator."
@@ -1179,6 +1202,7 @@ class ImportV1ChartSchema(Schema):
     slice_name = fields.String(required=True)
     viz_type = fields.String(required=True)
     params = fields.Dict()
+    query_context = fields.Dict()
     cache_timeout = fields.Integer(allow_none=True)
     uuid = fields.UUID(required=True)
     version = fields.String(required=True)

@@ -26,7 +26,7 @@ const propTypes = {
   annotationData: PropTypes.object,
   actions: PropTypes.object,
   chartId: PropTypes.number.isRequired,
-  datasource: PropTypes.object.isRequired,
+  datasource: PropTypes.object,
   initialValues: PropTypes.object,
   formData: PropTypes.object.isRequired,
   height: PropTypes.number,
@@ -45,7 +45,7 @@ const propTypes = {
   setDataMask: PropTypes.func,
   onFilterMenuOpen: PropTypes.func,
   onFilterMenuClose: PropTypes.func,
-  ownCurrentState: PropTypes.object,
+  ownState: PropTypes.object,
 };
 
 const BLANK = {};
@@ -93,8 +93,10 @@ class ChartRenderer extends React.Component {
         nextProps.queriesResponse !== this.props.queriesResponse;
       return (
         this.hasQueryResponseChange ||
+        nextProps.datasource !== this.props.datasource ||
         nextProps.annotationData !== this.props.annotationData ||
-        nextProps.ownCurrentState !== this.props.ownCurrentState ||
+        nextProps.ownState !== this.props.ownState ||
+        nextProps.filterState !== this.props.filterState ||
         nextProps.height !== this.props.height ||
         nextProps.width !== this.props.width ||
         nextProps.triggerRender ||
@@ -184,7 +186,8 @@ class ChartRenderer extends React.Component {
       annotationData,
       datasource,
       initialValues,
-      ownCurrentState,
+      ownState,
+      filterState,
       formData,
       queriesResponse,
     } = this.props;
@@ -221,12 +224,13 @@ class ChartRenderer extends React.Component {
         width={width}
         height={height}
         annotationData={annotationData}
-        datasource={datasource}
+        datasource={datasource || {}}
         initialValues={initialValues}
         formData={formData}
-        ownCurrentState={ownCurrentState}
+        ownState={ownState}
+        filterState={filterState}
         hooks={this.hooks}
-        behaviors={[Behavior.CROSS_FILTER]}
+        behaviors={[Behavior.INTERACTIVE_CHART]}
         queriesData={queriesResponse}
         onRenderSuccess={this.handleRenderSuccess}
         onRenderFailure={this.handleRenderFailure}

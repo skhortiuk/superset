@@ -17,18 +17,21 @@
  * under the License.
  */
 /* eslint-disable camelcase */
-import { isString, keyBy } from 'lodash';
-import shortid from 'shortid';
-import { CategoricalColorNamespace } from '@superset-ui/core';
-import querystring from 'query-string';
+import { isString } from 'lodash';
+import {
+  Behavior,
+  CategoricalColorNamespace,
+  getChartMetadataRegistry,
+} from '@superset-ui/core';
 
 import { chart } from 'src/chart/chartReducer';
 import { initSliceEntities } from 'src/dashboard/reducers/sliceEntities';
 import { getInitialState as getInitialNativeFilterState } from 'src/dashboard/reducers/nativeFilters';
-import { getParam } from 'src/modules/utils';
 import { applyDefaultFormData } from 'src/explore/store';
 import { buildActiveFilters } from 'src/dashboard/util/activeDashboardFilters';
-import getPermissions from 'src/dashboard/util/getPermissions';
+import findPermission, {
+  canUserEditDashboard,
+} from 'src/dashboard/util/findPermission';
 import {
   DASHBOARD_FILTER_SCOPE_GLOBAL,
   dashboardFilter,
@@ -37,6 +40,7 @@ import {
   DASHBOARD_HEADER_ID,
   GRID_DEFAULT_CHART_WIDTH,
   GRID_COLUMN_COUNT,
+  DASHBOARD_ROOT_ID,
 } from 'src/dashboard/util/constants';
 import {
   DASHBOARD_HEADER_TYPE,
@@ -49,39 +53,22 @@ import getFilterConfigsFromFormdata from 'src/dashboard/util/getFilterConfigsFro
 import getLocationHash from 'src/dashboard/util/getLocationHash';
 import newComponentFactory from 'src/dashboard/util/newComponentFactory';
 import { TIME_RANGE } from 'src/visualizations/FilterBox/FilterBox';
-
-const reservedQueryParams = new Set(['standalone', 'edit']);
-
-/**
- * Returns the url params that are used to customize queries
- * in datasets built using sql lab.
- * We may want to extract this to some kind of util in the future.
- */
-const extractUrlParams = queryParams =>
-  Object.entries(queryParams).reduce((acc, [key, value]) => {
-    if (reservedQueryParams.has(key)) return acc;
-    // if multiple url params share the same key (?foo=bar&foo=baz), they will appear as an array.
-    // Only one value can be used for a given query param, so we just take the first one.
-    if (Array.isArray(value)) {
-      return {
-        ...acc,
-        [key]: value[0],
-      };
-    }
-    return { ...acc, [key]: value };
-  }, {});
+import { URL_PARAMS } from 'src/constants';
+import { getUrlParam } from 'src/utils/urlUtils';
+import { FeatureFlag, isFeatureEnabled } from '../../featureFlags';
+import extractUrlParams from '../util/extractUrlParams';
 
 export const HYDRATE_DASHBOARD = 'HYDRATE_DASHBOARD';
 
-export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
+export const hydrateDashboard = (dashboardData, chartData) => (
   dispatch,
   getState,
 ) => {
   const { user, common } = getState();
-  const { metadata } = dashboardData;
-  const queryParams = querystring.parse(window.location.search);
-  const urlParams = extractUrlParams(queryParams);
-  const editMode = queryParams.edit === 'true';
+  let { metadata } = dashboardData;
+  const regularUrlParams = extractUrlParams('regular');
+  const reservedUrlParams = extractUrlParams('reserved');
+  const editMode = reservedUrlParams.edit === 'true';
 
   let preselectFilters = {};
 
@@ -91,9 +78,9 @@ export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
   });
   try {
     // allow request parameter overwrite dashboard metadata
-    preselectFilters = JSON.parse(
-      getParam('preselect_filters') || metadata.default_filters,
-    );
+    preselectFilters =
+      getUrlParam(URL_PARAMS.preselectFilters) ||
+      JSON.parse(metadata.default_filters);
   } catch (e) {
     //
   }
@@ -148,7 +135,7 @@ export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
       ...slice.form_data,
       url_params: {
         ...slice.form_data.url_params,
-        ...urlParams,
+        ...regularUrlParams,
       },
     };
     chartQueries[key] = {
@@ -204,10 +191,7 @@ export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
     }
 
     // build DashboardFilters for interactive filter features
-    if (
-      slice.form_data.viz_type === 'filter_box' ||
-      slice.form_data.viz_type === 'filter_select'
-    ) {
+    if (slice.form_data.viz_type === 'filter_box') {
       const configs = getFilterConfigsFromFormdata(slice.form_data);
       let { columns } = configs;
       const { labels } = configs;
@@ -299,23 +283,74 @@ export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
     filterSetsConfig: metadata?.filter_sets_configuration || [],
   });
 
-  const { roles } = getState().user;
+  if (!metadata) {
+    metadata = {};
+  }
+
+  metadata.show_native_filters =
+    dashboardData?.metadata?.show_native_filters ??
+    isFeatureEnabled(FeatureFlag.DASHBOARD_NATIVE_FILTERS);
+
+  if (isFeatureEnabled(FeatureFlag.DASHBOARD_CROSS_FILTERS)) {
+    // If user just added cross filter to dashboard it's not saving it scope on server,
+    // so we tweak it until user will update scope and will save it in server
+    Object.values(dashboardLayout.present).forEach(layoutItem => {
+      const chartId = layoutItem.meta?.chartId;
+      const behaviors =
+        (
+          getChartMetadataRegistry().get(
+            chartQueries[chartId]?.formData?.viz_type,
+          ) ?? {}
+        )?.behaviors ?? [];
+
+      if (!metadata.chart_configuration) {
+        metadata.chart_configuration = {};
+      }
+      if (
+        behaviors.includes(Behavior.INTERACTIVE_CHART) &&
+        !metadata.chart_configuration[chartId]
+      ) {
+        metadata.chart_configuration[chartId] = {
+          id: chartId,
+          crossFilters: {
+            scope: {
+              rootPath: [DASHBOARD_ROOT_ID],
+              excluded: [chartId], // By default it doesn't affects itself
+            },
+          },
+        };
+      }
+    });
+  }
+
+  const { roles } = user;
+  const canEdit = canUserEditDashboard(dashboardData, user);
 
   return dispatch({
     type: HYDRATE_DASHBOARD,
     data: {
-      datasources: keyBy(datasourcesData, 'uid'),
       sliceEntities: { ...initSliceEntities, slices, isLoading: false },
       charts: chartQueries,
       // read-only data
       dashboardInfo: {
         ...dashboardData,
+        metadata,
         userId: String(user.userId), // legacy, please use state.user instead
-        dash_edit_perm: getPermissions('can_write', 'Dashboard', roles),
-        dash_save_perm: getPermissions('can_save_dash', 'Superset', roles),
-        superset_can_explore: getPermissions('can_explore', 'Superset', roles),
-        superset_can_csv: getPermissions('can_csv', 'Superset', roles),
-        slice_can_edit: getPermissions('can_slice', 'Superset', roles),
+        dash_edit_perm: canEdit,
+        dash_save_perm: findPermission('can_save_dash', 'Superset', roles),
+        dash_share_perm: findPermission(
+          'can_share_dashboard',
+          'Superset',
+          roles,
+        ),
+        superset_can_explore: findPermission('can_explore', 'Superset', roles),
+        superset_can_share: findPermission(
+          'can_share_chart',
+          'Superset',
+          roles,
+        ),
+        superset_can_csv: findPermission('can_csv', 'Superset', roles),
+        slice_can_edit: findPermission('can_slice', 'Superset', roles),
         common: {
           // legacy, please use state.common instead
           flash_messages: common.flash_messages,
@@ -325,6 +360,7 @@ export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
       dashboardFilters,
       nativeFilters,
       dashboardState: {
+        preselectNativeFilters: getUrlParam(URL_PARAMS.nativeFilters),
         sliceIds: Array.from(sliceIds),
         directPathToChild,
         directPathLastUpdated: Date.now(),
@@ -337,15 +373,15 @@ export const hydrateDashboard = (dashboardData, chartData, datasourcesData) => (
         css: dashboardData.css || '',
         colorNamespace: metadata?.color_namespace || null,
         colorScheme: metadata?.color_scheme || null,
-        editMode: getPermissions('can_write', 'Dashboard', roles) && editMode,
+        editMode: canEdit && editMode,
         isPublished: dashboardData.published,
         hasUnsavedChanges: false,
         maxUndoHistoryExceeded: false,
         lastModifiedTime: dashboardData.changed_on,
+        isRefreshing: false,
+        activeTabs: [],
       },
       dashboardLayout,
-      messageToasts: [],
-      impressionId: shortid.generate(),
     },
   });
 };

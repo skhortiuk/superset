@@ -18,33 +18,38 @@
  */
 import { styled, SupersetClient, t } from '@superset-ui/core';
 import React, { useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import rison from 'rison';
 import { isFeatureEnabled, FeatureFlag } from 'src/featureFlags';
 import {
   createFetchRelated,
   createErrorHandler,
   handleDashboardDelete,
-  handleBulkDashboardExport,
 } from 'src/views/CRUD/utils';
 import { useListViewResource, useFavoriteStatus } from 'src/views/CRUD/hooks';
 import ConfirmStatusChange from 'src/components/ConfirmStatusChange';
+import handleResourceExport from 'src/utils/export';
+import Loading from 'src/components/Loading';
 import SubMenu, { SubMenuProps } from 'src/components/Menu/SubMenu';
 import ListView, {
   ListViewProps,
+  Filter,
   Filters,
-  FilterOperators,
+  FilterOperator,
 } from 'src/components/ListView';
+import { getFromLocalStorage } from 'src/utils/localStorageHelpers';
 import Owner from 'src/types/Owner';
 import withToasts from 'src/messageToasts/enhancers/withToasts';
 import FacePile from 'src/components/FacePile';
 import Icons from 'src/components/Icons';
 import FaveStar from 'src/components/FaveStar';
 import PropertiesModal from 'src/dashboard/components/PropertiesModal';
-import { Tooltip } from 'src/common/components/Tooltip';
+import { Tooltip } from 'src/components/Tooltip';
 import ImportModelsModal from 'src/components/ImportModal/index';
 
 import Dashboard from 'src/dashboard/containers/Dashboard';
 import DashboardCard from './DashboardCard';
+import { DashboardStatus } from './types';
 
 const PAGE_SIZE = 25;
 const PASSWORDS_NEEDED_MESSAGE = t(
@@ -119,6 +124,7 @@ function DashboardList(props: DashboardListProps) {
 
   const [importingDashboard, showImportModal] = useState<boolean>(false);
   const [passwordFields, setPasswordFields] = useState<string[]>([]);
+  const [preparingExport, setPreparingExport] = useState<boolean>(false);
 
   const openDashboardImportModal = () => {
     showImportModal(true);
@@ -151,8 +157,28 @@ function DashboardList(props: DashboardListProps) {
       ({ json = {} }) => {
         setDashboards(
           dashboards.map(dashboard => {
-            if (dashboard.id === json.id) {
-              return json.result;
+            if (dashboard.id === json?.result?.id) {
+              const {
+                changed_by_name,
+                changed_by_url,
+                changed_by,
+                dashboard_title = '',
+                slug = '',
+                json_metadata = '',
+                changed_on_delta_humanized,
+                url = '',
+              } = json.result;
+              return {
+                ...dashboard,
+                changed_by_name,
+                changed_by_url,
+                changed_by,
+                dashboard_title,
+                slug,
+                json_metadata,
+                changed_on_delta_humanized,
+                url,
+              };
             }
             return dashboard;
           }),
@@ -165,6 +191,14 @@ function DashboardList(props: DashboardListProps) {
       ),
     );
   }
+
+  const handleBulkDashboardExport = (dashboardsToExport: Dashboard[]) => {
+    const ids = dashboardsToExport.map(({ id }) => id);
+    handleResourceExport('dashboard', ids, () => {
+      setPreparingExport(false);
+    });
+    setPreparingExport(true);
+  };
 
   function handleBulkDashboardDelete(dashboardsToDelete: Dashboard[]) {
     return SupersetClient.delete({
@@ -186,29 +220,33 @@ function DashboardList(props: DashboardListProps) {
 
   const columns = useMemo(
     () => [
-      {
-        Cell: ({
-          row: {
-            original: { id },
-          },
-        }: any) => (
-          <FaveStar
-            itemId={id}
-            saveFaveStar={saveFavoriteStatus}
-            isStarred={favoriteStatus[id]}
-          />
-        ),
-        Header: '',
-        id: 'id',
-        disableSortBy: true,
-        size: 'xs',
-      },
+      ...(props.user.userId
+        ? [
+            {
+              Cell: ({
+                row: {
+                  original: { id },
+                },
+              }: any) => (
+                <FaveStar
+                  itemId={id}
+                  saveFaveStar={saveFavoriteStatus}
+                  isStarred={favoriteStatus[id]}
+                />
+              ),
+              Header: '',
+              id: 'id',
+              disableSortBy: true,
+              size: 'xs',
+            },
+          ]
+        : []),
       {
         Cell: ({
           row: {
             original: { url, dashboard_title: dashboardTitle },
           },
-        }: any) => <a href={url}>{dashboardTitle}</a>,
+        }: any) => <Link to={url}>{dashboardTitle}</Link>,
         Header: t('Title'),
         accessor: 'dashboard_title',
       },
@@ -229,9 +267,10 @@ function DashboardList(props: DashboardListProps) {
       {
         Cell: ({
           row: {
-            original: { published },
+            original: { status },
           },
-        }: any) => (published ? t('Published') : t('Draft')),
+        }: any) =>
+          status === DashboardStatus.PUBLISHED ? t('Published') : t('Draft'),
         Header: t('Status'),
         accessor: 'published',
         size: 'xl',
@@ -353,15 +392,33 @@ function DashboardList(props: DashboardListProps) {
         disableSortBy: true,
       },
     ],
-    [canEdit, canDelete, canExport, favoriteStatus],
+    [
+      canEdit,
+      canDelete,
+      canExport,
+      ...(props.user.userId ? [favoriteStatus] : []),
+    ],
   );
+
+  const favoritesFilter: Filter = {
+    Header: t('Favorite'),
+    id: 'id',
+    urlDisplay: 'favorite',
+    input: 'select',
+    operator: FilterOperator.dashboardIsFav,
+    unfilteredLabel: t('Any'),
+    selects: [
+      { label: t('Yes'), value: true },
+      { label: t('No'), value: false },
+    ],
+  };
 
   const filters: Filters = [
     {
       Header: t('Owner'),
       id: 'owners',
       input: 'select',
-      operator: FilterOperators.relationManyMany,
+      operator: FilterOperator.relationManyMany,
       unfilteredLabel: t('All'),
       fetchSelects: createFetchRelated(
         'dashboard',
@@ -382,7 +439,7 @@ function DashboardList(props: DashboardListProps) {
       Header: t('Created by'),
       id: 'created_by',
       input: 'select',
-      operator: FilterOperators.relationOneMany,
+      operator: FilterOperator.relationOneMany,
       unfilteredLabel: t('All'),
       fetchSelects: createFetchRelated(
         'dashboard',
@@ -403,30 +460,19 @@ function DashboardList(props: DashboardListProps) {
       Header: t('Status'),
       id: 'published',
       input: 'select',
-      operator: FilterOperators.equals,
+      operator: FilterOperator.equals,
       unfilteredLabel: t('Any'),
       selects: [
         { label: t('Published'), value: true },
-        { label: t('Unpublished'), value: false },
+        { label: t('Draft'), value: false },
       ],
     },
-    {
-      Header: t('Favorite'),
-      id: 'id',
-      urlDisplay: 'favorite',
-      input: 'select',
-      operator: FilterOperators.dashboardIsFav,
-      unfilteredLabel: t('Any'),
-      selects: [
-        { label: t('Yes'), value: true },
-        { label: t('No'), value: false },
-      ],
-    },
+    ...(props.user.userId ? [favoritesFilter] : []),
     {
       Header: t('Search'),
       id: 'dashboard_title',
       input: 'search',
-      operator: FilterOperators.titleOrSlug,
+      operator: FilterOperator.titleOrSlug,
     },
   ];
 
@@ -452,18 +498,26 @@ function DashboardList(props: DashboardListProps) {
   ];
 
   function renderCard(dashboard: Dashboard) {
+    const { userId } = props.user;
+    const userKey = getFromLocalStorage(userId.toString(), null);
     return (
       <DashboardCard
         dashboard={dashboard}
         hasPerm={hasPerm}
         bulkSelectEnabled={bulkSelectEnabled}
         refreshData={refreshData}
+        showThumbnails={
+          userKey
+            ? userKey.thumbnails
+            : isFeatureEnabled(FeatureFlag.THUMBNAILS)
+        }
         loading={loading}
         addDangerToast={addDangerToast}
         addSuccessToast={addSuccessToast}
         openDashboardEditModal={openDashboardEditModal}
         saveFavoriteStatus={saveFavoriteStatus}
         favoriteStatus={favoriteStatus[dashboard.id]}
+        handleBulkDashboardExport={handleBulkDashboardExport}
       />
     );
   }
@@ -492,7 +546,15 @@ function DashboardList(props: DashboardListProps) {
   }
   if (isFeatureEnabled(FeatureFlag.VERSIONED_EXPORT)) {
     subMenuButtons.push({
-      name: <Icons.Import />,
+      name: (
+        <Tooltip
+          id="import-tooltip"
+          title={t('Import dashboards')}
+          placement="bottomRight"
+        >
+          <Icons.Import data-test="import-button" />
+        </Tooltip>
+      ),
       buttonStyle: 'link',
       onClick: openDashboardImportModal,
     });
@@ -574,6 +636,7 @@ function DashboardList(props: DashboardListProps) {
         passwordFields={passwordFields}
         setPasswordFields={setPasswordFields}
       />
+      {preparingExport && <Loading />}
     </>
   );
 }

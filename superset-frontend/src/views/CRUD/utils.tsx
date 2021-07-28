@@ -16,17 +16,21 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
 import {
   t,
   SupersetClient,
   SupersetClientResponse,
   logging,
   styled,
+  SupersetTheme,
+  css,
 } from '@superset-ui/core';
 import Chart from 'src/types/Chart';
 import rison from 'rison';
 import { getClientErrorObject } from 'src/utils/getClientErrorObject';
 import { FetchDataConfig } from 'src/components/ListView';
+import SupersetText from 'src/utils/textUtils';
 import { Dashboard, Filters } from './types';
 
 const createFetchResourceMethod = (method: string) => (
@@ -154,10 +158,25 @@ export const createFetchRelated = createFetchResourceMethod('related');
 export const createFetchDistinct = createFetchResourceMethod('distinct');
 
 export function createErrorHandler(
-  handleErrorFunc: (errMsg?: string | Record<string, string[]>) => void,
+  handleErrorFunc: (
+    errMsg?: string | Record<string, string[] | string>,
+  ) => void,
 ) {
   return async (e: SupersetClientResponse | string) => {
     const parsedError = await getClientErrorObject(e);
+    // Taking the first error returned from the API
+    // @ts-ignore
+    const errorsArray = parsedError?.errors;
+    const config = await SupersetText;
+    if (
+      errorsArray &&
+      errorsArray.length &&
+      config &&
+      config.ERRORS &&
+      errorsArray[0].error_type in config.ERRORS
+    ) {
+      parsedError.message = config.ERRORS[errorsArray[0].error_type];
+    }
     logging.error(e);
     handleErrorFunc(parsedError.message || parsedError.error);
   };
@@ -199,22 +218,6 @@ export function handleChartDelete(
     () => {
       addDangerToast(t('There was an issue deleting: %s', sliceName));
     },
-  );
-}
-
-export function handleBulkChartExport(chartsToExport: Chart[]) {
-  return window.location.assign(
-    `/api/v1/chart/export/?q=${rison.encode(
-      chartsToExport.map(({ id }) => id),
-    )}`,
-  );
-}
-
-export function handleBulkDashboardExport(dashboardsToExport: Dashboard[]) {
-  return window.location.assign(
-    `/api/v1/dashboard/export/?q=${rison.encode(
-      dashboardsToExport.map(({ id }) => id),
-    )}`,
   );
 }
 
@@ -274,15 +277,13 @@ export const mq = breakpoints.map(bp => `@media (max-width: ${bp}px)`);
 export const CardContainer = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(31%, 31%));
-  ${[mq[3]]} {
+  ${mq[3]} {
     grid-template-columns: repeat(auto-fit, minmax(31%, 31%));
   }
-
-  ${[mq[2]]} {
+  ${mq[2]} {
     grid-template-columns: repeat(auto-fit, minmax(48%, 48%));
   }
-
-  ${[mq[1]]} {
+  ${mq[1]} {
     grid-template-columns: repeat(auto-fit, minmax(50%, 80%));
   }
   grid-gap: ${({ theme }) => theme.gridUnit * 8}px;
@@ -297,3 +298,45 @@ export const CardStyles = styled.div`
     text-decoration: none;
   }
 `;
+
+export const StyledIcon = (theme: SupersetTheme) => css`
+  margin: auto ${theme.gridUnit * 2}px auto 0;
+  color: ${theme.colors.grayscale.base};
+`;
+
+export /* eslint-disable no-underscore-dangle */
+const isNeedsPassword = (payload: any) =>
+  typeof payload === 'object' &&
+  Array.isArray(payload._schema) &&
+  payload._schema.length === 1 &&
+  payload._schema[0] === 'Must provide a password for the database';
+
+export const isAlreadyExists = (payload: any) =>
+  typeof payload === 'string' &&
+  payload.includes('already exists and `overwrite=true` was not passed');
+
+export const getPasswordsNeeded = (errors: Record<string, any>[]) =>
+  errors
+    .map(error =>
+      Object.entries(error.extra)
+        .filter(([, payload]) => isNeedsPassword(payload))
+        .map(([fileName]) => fileName),
+    )
+    .flat();
+
+export const getAlreadyExists = (errors: Record<string, any>[]) =>
+  errors
+    .map(error =>
+      Object.entries(error.extra)
+        .filter(([, payload]) => isAlreadyExists(payload))
+        .map(([fileName]) => fileName),
+    )
+    .flat();
+
+export const hasTerminalValidation = (errors: Record<string, any>[]) =>
+  errors.some(
+    error =>
+      !Object.values(error.extra).some(
+        payload => isNeedsPassword(payload) || isAlreadyExists(payload),
+      ),
+  );

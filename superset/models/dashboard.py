@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from functools import partial
-from typing import Any, Callable, Dict, List, Set, Union
+from typing import Any, Callable, Dict, List, Set, Tuple, Type, Union
 
 import sqlalchemy as sqla
 from flask_appbuilder import Model
@@ -38,7 +39,6 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.engine.base import Connection
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import relationship, sessionmaker, subqueryload
 from sqlalchemy.orm.mapper import Mapper
 from sqlalchemy.orm.session import object_session
@@ -49,7 +49,6 @@ from superset import app, ConnectorRegistry, db, is_feature_enabled, security_ma
 from superset.connectors.base.models import BaseDatasource
 from superset.connectors.druid.models import DruidColumn, DruidMetric
 from superset.connectors.sqla.models import SqlMetric, TableColumn
-from superset.exceptions import SupersetException
 from superset.extensions import cache_manager
 from superset.models.helpers import AuditMixinNullable, ImportExportMixin
 from superset.models.slice import Slice
@@ -58,6 +57,7 @@ from superset.models.user_attributes import UserAttribute
 from superset.tasks.thumbnails import cache_dashboard_thumbnail
 from superset.utils import core as utils
 from superset.utils.decorators import debounce
+from superset.utils.hashing import md5_sha_from_str
 from superset.utils.urls import get_url_path
 
 # pylint: disable=too-many-public-methods
@@ -172,7 +172,21 @@ class Dashboard(  # pylint: disable=too-many-instance-attributes
 
     @property
     def datasources(self) -> Set[BaseDatasource]:
-        return {slc.datasource for slc in self.slices}
+        # Verbose but efficient database enumeration of dashboard datasources.
+        datasources_by_cls_model: Dict[Type["BaseDatasource"], Set[int]] = defaultdict(
+            set
+        )
+
+        for slc in self.slices:
+            datasources_by_cls_model[slc.cls_model].add(slc.datasource_id)
+
+        return {
+            datasource
+            for cls_model, datasource_ids in datasources_by_cls_model.items()
+            for datasource in db.session.query(cls_model)
+            .filter(cls_model.id.in_(datasource_ids))
+            .all()
+        }
 
     @property
     def charts(self) -> List[BaseDatasource]:
@@ -183,6 +197,12 @@ class Dashboard(  # pylint: disable=too-many-instance-attributes
         # pylint: disable=no-member
         meta = MetaData(bind=self.get_sqla_engine())
         meta.reflect()
+
+    @property
+    def status(self) -> utils.DashboardStatus:
+        if self.published:
+            return utils.DashboardStatus.PUBLISHED
+        return utils.DashboardStatus.DRAFT
 
     @renders("dashboard_title")
     def dashboard_link(self) -> Markup:
@@ -195,7 +215,7 @@ class Dashboard(  # pylint: disable=too-many-instance-attributes
         Returns a MD5 HEX digest that makes this dashboard unique
         """
         unique_string = f"{self.position_json}.{self.css}.{self.json_metadata}"
-        return utils.md5_hex(unique_string)
+        return md5_sha_from_str(unique_string)
 
     @property
     def thumbnail_url(self) -> str:
@@ -236,30 +256,30 @@ class Dashboard(  # pylint: disable=too-many-instance-attributes
 
     @cache_manager.cache.memoize(
         # manage cache version manually
-        make_name=lambda fname: f"{fname}-v2.1",
+        make_name=lambda fname: f"{fname}-v1.0",
         unless=lambda: not is_feature_enabled("DASHBOARD_CACHE"),
     )
-    def full_data(self) -> Dict[str, Any]:
-        """Bootstrap data for rendering the dashboard page."""
-        slices = self.slices
-        datasource_slices = utils.indexed(slices, "datasource")
-        try:
-            datasources = {
+    def datasets_trimmed_for_slices(self) -> List[Dict[str, Any]]:
+        # Verbose but efficient database enumeration of dashboard datasources.
+        slices_by_datasource: Dict[
+            Tuple[Type["BaseDatasource"], int], Set[Slice]
+        ] = defaultdict(set)
+
+        for slc in self.slices:
+            slices_by_datasource[(slc.cls_model, slc.datasource_id)].add(slc)
+
+        result: List[Dict[str, Any]] = []
+
+        for (cls_model, datasource_id), slices in slices_by_datasource.items():
+            datasource = (
+                db.session.query(cls_model).filter_by(id=datasource_id).one_or_none()
+            )
+
+            if datasource:
                 # Filter out unneeded fields from the datasource payload
-                datasource.uid: datasource.data_for_slices(slices)
-                for datasource, slices in datasource_slices.items()
-                if datasource
-            }
-        except (SupersetException, SQLAlchemyError):
-            datasources = {}
-        return {
-            # dashboard metadata
-            "dashboard": self.data,
-            # slices metadata
-            "slices": [slc.data for slc in slices],
-            # datasource metadata
-            "datasources": datasources,
-        }
+                result.append(datasource.data_for_slices(slices))
+
+        return result
 
     @property  # type: ignore
     def params(self) -> str:  # type: ignore
@@ -281,7 +301,7 @@ class Dashboard(  # pylint: disable=too-many-instance-attributes
 
     @debounce(0.1)
     def clear_cache(self) -> None:
-        cache_manager.cache.delete_memoized(Dashboard.full_data, self)
+        cache_manager.cache.delete_memoized(Dashboard.datasets_trimmed_for_slices, self)
 
     @classmethod
     @debounce(0.1)
@@ -341,6 +361,20 @@ class Dashboard(  # pylint: disable=too-many-instance-attributes
                 # set slices without creating ORM relations
                 slices = copied_dashboard.__dict__.setdefault("slices", [])
                 slices.append(copied_slc)
+
+            json_metadata = json.loads(dashboard.json_metadata)
+            native_filter_configuration: List[Dict[str, Any]] = json_metadata.get(
+                "native_filter_configuration", []
+            )
+            for native_filter in native_filter_configuration:
+                session = db.session()
+                for target in native_filter.get("targets", []):
+                    id_ = target.get("datasetId")
+                    if id_ is None:
+                        continue
+                    datasource = ConnectorRegistry.get_datasource_by_id(session, id_)
+                    datasource_ids.add((datasource.id, datasource.type))
+
             copied_dashboard.alter_params(remote_id=dashboard_id)
             copied_dashboards.append(copied_dashboard)
 

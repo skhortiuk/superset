@@ -21,8 +21,8 @@ import PropTypes from 'prop-types';
 import { t, styled, supersetTheme } from '@superset-ui/core';
 
 import { Dropdown, Menu } from 'src/common/components';
-import { Tooltip } from 'src/common/components/Tooltip';
-import Icon from 'src/components/Icon';
+import { Tooltip } from 'src/components/Tooltip';
+import Icons from 'src/components/Icons';
 import ChangeDatasourceModal from 'src/datasource/ChangeDatasourceModal';
 import DatasourceModal from 'src/datasource/DatasourceModal';
 import { postForm } from 'src/explore/exploreUtils';
@@ -91,6 +91,12 @@ const Styles = styled.div`
   .dataset-svg {
     margin-right: ${({ theme }) => 2 * theme.gridUnit}px;
     flex: none;
+  }
+  span[aria-label='dataset-physical'] {
+    color: ${({ theme }) => theme.colors.grayscale.base};
+  }
+  span[aria-label='more-horiz'] {
+    color: ${({ theme }) => theme.colors.primary.base};
   }
 `;
 
@@ -189,7 +195,7 @@ class DatasourceControl extends React.PureComponent {
     return (
       <Styles data-test="datasource-control" className="DatasourceControl">
         <div className="data-container">
-          <Icon name="dataset-physical" className="dataset-svg" />
+          <Icons.DatasetPhysical className="dataset-svg" />
           {/* Add a tooltip only for long dataset names */}
           {!isMissingDatasource && datasource.name.length > 25 ? (
             <Tooltip title={datasource.name}>
@@ -202,10 +208,7 @@ class DatasourceControl extends React.PureComponent {
           )}
           {healthCheckMessage && (
             <Tooltip title={healthCheckMessage}>
-              <Icon
-                name="alert-solid"
-                color={supersetTheme.colors.warning.base}
-              />
+              <Icons.AlertSolid iconColor={supersetTheme.colors.warning.base} />
             </Tooltip>
           )}
           {extra?.warning_markdown && ( // eslint-disable-line camelcase
@@ -220,10 +223,9 @@ class DatasourceControl extends React.PureComponent {
             data-test="datasource-menu"
           >
             <Tooltip title={t('More dataset related options')}>
-              <Icon
+              <Icons.MoreHoriz
                 className="datasource-modal-trigger"
                 data-test="datasource-menu-trigger"
-                name="more-horiz"
               />
             </Tooltip>
           </Dropdown>

@@ -29,7 +29,6 @@ from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, String, Text
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.visitors import VisitableType
 
-from superset import is_feature_enabled
 from superset.connectors.sqla.models import SqlaTable
 from superset.models.core import Database
 from superset.utils.core import get_example_database
@@ -39,7 +38,7 @@ logger = logging.getLogger(__name__)
 CHUNKSIZE = 512
 VARCHAR = re.compile(r"VARCHAR\((\d+)\)", re.IGNORECASE)
 
-JSON_KEYS = {"params", "template_params", "extra"}
+JSON_KEYS = {"params", "template_params"}
 
 
 type_map = {
@@ -99,11 +98,12 @@ def import_dataset(
             except TypeError:
                 logger.info("Unable to encode `%s` field: %s", key, config[key])
     for metric in config.get("metrics", []):
-        if metric.get("extra"):
+        if metric.get("extra") is not None:
             try:
                 metric["extra"] = json.dumps(metric["extra"])
             except TypeError:
                 logger.info("Unable to encode `extra` field: %s", metric["extra"])
+                metric["extra"] = None
 
     # should we delete columns and metrics not present in the current import?
     sync = ["columns", "metrics"] if overwrite else []
@@ -116,11 +116,16 @@ def import_dataset(
     if dataset.id is None:
         session.flush()
 
-    if is_feature_enabled("CREATE_EXAMPLES_DATABASE"):
-        example_database = get_example_database()
+    example_database = get_example_database()
+    try:
         table_exists = example_database.has_table_by_name(dataset.table_name)
-        if data_uri and (not table_exists or force_data):
-            load_data(data_uri, dataset, example_database, session)
+    except Exception as ex:
+        # MySQL doesn't play nice with GSheets table names
+        logger.warning("Couldn't check if table %s exists, stopping import")
+        raise ex
+
+    if data_uri and (not table_exists or force_data):
+        load_data(data_uri, dataset, example_database, session)
 
     return dataset
 

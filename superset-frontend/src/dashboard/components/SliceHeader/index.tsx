@@ -18,53 +18,38 @@
  */
 import React, { FC } from 'react';
 import { styled, t } from '@superset-ui/core';
-import { Tooltip } from 'src/common/components/Tooltip';
-import { useSelector } from 'react-redux';
+import { Tooltip } from 'src/components/Tooltip';
+import { useDispatch, useSelector } from 'react-redux';
 import EditableTitle from 'src/components/EditableTitle';
-import SliceHeaderControls from 'src/dashboard/components/SliceHeaderControls';
-import FiltersBadge from 'src/dashboard/containers/FiltersBadge';
-import Icon from 'src/components/Icon';
+import SliceHeaderControls, {
+  SliceHeaderControlsProps,
+} from 'src/dashboard/components/SliceHeaderControls';
+import FiltersBadge from 'src/dashboard/components/FiltersBadge';
+import Icons from 'src/components/Icons';
 import { RootState } from 'src/dashboard/types';
-import { Slice } from 'src/types/Chart';
 import FilterIndicator from 'src/dashboard/components/FiltersBadge/FilterIndicator';
+import { clearDataMask } from 'src/dataMask/actions';
 
-type SliceHeaderProps = {
+type SliceHeaderProps = SliceHeaderControlsProps & {
   innerRef?: string;
-  slice: Slice;
-  isExpanded?: boolean;
-  isCached?: boolean[];
-  cachedDttm?: string[];
-  updatedDttm?: number;
   updateSliceName?: (arg0: string) => void;
-  toggleExpandSlice?: Function;
-  forceRefresh?: Function;
-  exploreChart?: Function;
-  exportCSV?: Function;
   editMode?: boolean;
-  isFullSize?: boolean;
   annotationQuery?: object;
   annotationError?: object;
   sliceName?: string;
-  supersetCanExplore?: boolean;
-  supersetCanCSV?: boolean;
-  sliceCanEdit?: boolean;
-  componentId: string;
-  dashboardId: number;
   filters: object;
-  addSuccessToast: Function;
-  addDangerToast: Function;
-  handleToggleFullSize: Function;
-  chartStatus: string;
+  handleToggleFullSize: () => void;
+  formData: object;
 };
 
-const annoationsLoading = t('Annotation layers are still loading.');
-const annoationsError = t('One ore more annotation layers failed loading.');
+const annotationsLoading = t('Annotation layers are still loading.');
+const annotationsError = t('One ore more annotation layers failed loading.');
 
-const CrossFilterIcon = styled(Icon)`
-  fill: ${({ theme }) => theme.colors.grayscale.light5};
-  & circle {
-    fill: ${({ theme }) => theme.colors.primary.base};
-  }
+const CrossFilterIcon = styled(Icons.CursorTarget)`
+  cursor: pointer;
+  color: ${({ theme }) => theme.colors.primary.base};
+  height: 22px;
+  width: 22px;
 `;
 
 const SliceHeader: FC<SliceHeaderProps> = ({
@@ -72,7 +57,8 @@ const SliceHeader: FC<SliceHeaderProps> = ({
   forceRefresh = () => ({}),
   updateSliceName = () => ({}),
   toggleExpandSlice = () => ({}),
-  exploreChart = () => ({}),
+  logExploreChart = () => ({}),
+  exploreUrl = '#',
   exportCSV = () => ({}),
   editMode = false,
   annotationQuery = {},
@@ -80,11 +66,13 @@ const SliceHeader: FC<SliceHeaderProps> = ({
   cachedDttm = null,
   updatedDttm = null,
   isCached = [],
-  isExpanded = [],
+  isExpanded = false,
   sliceName = '',
   supersetCanExplore = false,
+  supersetCanShare = false,
   supersetCanCSV = false,
   sliceCanEdit = false,
+  exportFullCSV,
   slice,
   componentId,
   dashboardId,
@@ -93,11 +81,12 @@ const SliceHeader: FC<SliceHeaderProps> = ({
   handleToggleFullSize,
   isFullSize,
   chartStatus,
+  formData,
 }) => {
+  const dispatch = useDispatch();
   // TODO: change to indicator field after it will be implemented
   const crossFilterValue = useSelector<RootState, any>(
-    state =>
-      state.dataMask?.crossFilters?.[slice?.slice_id]?.currentState?.value,
+    state => state.dataMask[slice?.slice_id]?.filterState?.value,
   );
 
   return (
@@ -119,11 +108,11 @@ const SliceHeader: FC<SliceHeaderProps> = ({
           <Tooltip
             id="annotations-loading-tooltip"
             placement="top"
-            title={annoationsLoading}
+            title={annotationsLoading}
           >
             <i
               role="img"
-              aria-label={annoationsLoading}
+              aria-label={annotationsLoading}
               className="fa fa-refresh warning"
             />
           </Tooltip>
@@ -132,11 +121,11 @@ const SliceHeader: FC<SliceHeaderProps> = ({
           <Tooltip
             id="annoation-errors-tooltip"
             placement="top"
-            title={annoationsError}
+            title={annotationsError}
           >
             <i
               role="img"
-              aria-label={annoationsError}
+              aria-label={annotationsError}
               className="fa fa-exclamation-circle danger"
             />
           </Tooltip>
@@ -154,10 +143,13 @@ const SliceHeader: FC<SliceHeaderProps> = ({
                       value: crossFilterValue,
                       name: t('Emitted values'),
                     }}
+                    text={t('Click to clear emitted filters')}
                   />
                 }
               >
-                <CrossFilterIcon name="cross-filter-badge" />
+                <CrossFilterIcon
+                  onClick={() => dispatch(clearDataMask(slice?.slice_id))}
+                />
               </Tooltip>
             )}
             <FiltersBadge chartId={slice.slice_id} />
@@ -169,9 +161,12 @@ const SliceHeader: FC<SliceHeaderProps> = ({
               updatedDttm={updatedDttm}
               toggleExpandSlice={toggleExpandSlice}
               forceRefresh={forceRefresh}
-              exploreChart={exploreChart}
+              logExploreChart={logExploreChart}
+              exploreUrl={exploreUrl}
               exportCSV={exportCSV}
+              exportFullCSV={exportFullCSV}
               supersetCanExplore={supersetCanExplore}
+              supersetCanShare={supersetCanShare}
               supersetCanCSV={supersetCanCSV}
               sliceCanEdit={sliceCanEdit}
               componentId={componentId}
@@ -181,6 +176,7 @@ const SliceHeader: FC<SliceHeaderProps> = ({
               handleToggleFullSize={handleToggleFullSize}
               isFullSize={isFullSize}
               chartStatus={chartStatus}
+              formData={formData}
             />
           </>
         )}
